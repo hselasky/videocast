@@ -1,6 +1,7 @@
+PREFIX?=        /usr/local
 PTHREAD_LIBS?=	-lpthread
 LOCALBASE?=     /usr/local
-
+BINDIR=         ${PREFIX}/sbin
 PROG=videocast
 MAN=
 CFLAGS=-I${LOCALBASE}/include
