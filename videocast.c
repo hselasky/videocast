@@ -42,8 +42,103 @@
 #define	NVIDEODEV 16
 #define	NAUDIODEV 16
 
+/* the following table was imported from ffmpeg's V4L2 driver */
+
+static const struct {
+	const char *const pixfmt_str;
+	const char *const codec_str;
+	uint32_t pixfmt;
+}	format_table[] = {
+
+	{
+		"yuv420p", "rawvideo", V4L2_PIX_FMT_YUV420
+	},
+	{
+		"yuv420p", "rawvideo", V4L2_PIX_FMT_YVU420
+	},
+	{
+		"yuv422p", "rawvideo", V4L2_PIX_FMT_YUV422P
+	},
+	{
+		"yuyv422", "rawvideo", V4L2_PIX_FMT_YUYV
+	},
+	{
+		"uyvy422", "rawvideo", V4L2_PIX_FMT_UYVY
+	},
+	{
+		"yuv411p", "rawvideo", V4L2_PIX_FMT_YUV411P
+	},
+	{
+		"yuv410p", "rawvideo", V4L2_PIX_FMT_YUV410
+	},
+	{
+		"yuv410p", "rawvideo", V4L2_PIX_FMT_YVU410
+	},
+	{
+		"rgb555le", "rawvideo", V4L2_PIX_FMT_RGB555
+	},
+	{
+		"rgb555be", "rawvideo", V4L2_PIX_FMT_RGB555X
+	},
+	{
+		"rgb565le", "rawvideo", V4L2_PIX_FMT_RGB565
+	},
+	{
+		"rgb565be", "rawvideo", V4L2_PIX_FMT_RGB565X
+	},
+	{
+		"bgr24", "rawvideo", V4L2_PIX_FMT_BGR24
+	},
+	{
+		"rgb24", "rawvideo", V4L2_PIX_FMT_RGB24
+	},
+	{
+		"bgr0", "rawvideo", V4L2_PIX_FMT_BGR32
+	},
+	{
+		"0rgb", "rawvideo", V4L2_PIX_FMT_RGB32
+	},
+	{
+		"gray8", "rawvideo", V4L2_PIX_FMT_GREY
+	},
+	{
+		"gray16le", "rawvideo", V4L2_PIX_FMT_Y16
+	},
+	{
+		"nv12", "rawvideo", V4L2_PIX_FMT_NV12
+	},
+	{
+		"", "mjpeg", V4L2_PIX_FMT_MJPEG
+	},
+	{
+		"", "mjpeg", V4L2_PIX_FMT_JPEG
+	},
+	{
+		"", "h264", V4L2_PIX_FMT_H264
+	},
+	{
+		"", "cpia", V4L2_PIX_FMT_CPIA1
+	},
+	{
+		"bayer_bggr8", "rawvideo", V4L2_PIX_FMT_SBGGR8
+	},
+	{
+		"bayer_gbrg8", "rawvideo", V4L2_PIX_FMT_SGBRG8
+	},
+	{
+		"bayer_grbg8", "rawvideo", V4L2_PIX_FMT_SGRBG8
+	},
+	{
+		"bayer_rggb8", "rawvideo", V4L2_PIX_FMT_SRGGB8
+	},
+	{
+		NULL, NULL, 0
+	}
+};
+
 struct vc_info {
 	void   *framebuffer;
+	uint32_t framebytesused;
 	uint32_t framesize;
 	const char *devname;
 	void   *addr[NBUFFER];
@@ -156,6 +251,7 @@ video_thread(void *arg)
 	struct vc_info *pcvi = arg;
 	int error;
 	int i;
+	int do_unref = 1;
 
 	/* standard V4L2 setup */
 
@@ -179,6 +275,10 @@ video_thread(void *arg)
 	if (error != 0)
 		errx(EX_SOFTWARE, "%s: Cannot set format", pcvi->devname);
 
+	error = ioctl(pcvi->fd, VIDIOC_G_FMT, &pcvi->fmt);
+	if (error != 0)
+		errx(EX_SOFTWARE, "%s: Cannot get format", pcvi->devname);
+
 	pcvi->width = pcvi->fmt.fmt.pix.width;
 	pcvi->height = pcvi->fmt.fmt.pix.height;
 
@@ -197,6 +297,7 @@ video_thread(void *arg)
 		error = ioctl(pcvi->fd, VIDIOC_QUERYBUF, &pcvi->buf);
 		if (error != 0)
 			errx(EX_SOFTWARE, "%s: Cannot query buffer", pcvi->devname);
+		pcvi->framesize = pcvi->buf.length;
 		pcvi->addr[i] = mmap(0,
 		    pcvi->buf.length, PROT_READ, MAP_SHARED, pcvi->fd,
 		    pcvi->buf.m.offset);
@@ -212,21 +313,11 @@ video_thread(void *arg)
 			errx(EX_SOFTWARE, "%s: Cannot queue buffer", pcvi->devname);
 	}
 
-	pcvi->framesize = pcvi->width * pcvi->height * 2;
 	pcvi->framebuffer = malloc(pcvi->framesize);
 	if (pcvi->framebuffer == NULL)
 		errx(EX_SOFTWARE, "%s: Cannot allocate memory", pcvi->devname);
 
 	memset(pcvi->framebuffer, 0, sizeof(pcvi->framebuffer));
-
-	atomic_lock();
-	wait_init--;
-	while (wait_init != 0) {
-		atomic_unlock();
-		usleep(1000);
-		atomic_lock();
-	}
-	atomic_unlock();
 
 	i = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	error = ioctl(pcvi->fd, VIDIOC_STREAMON, &i);
@@ -243,11 +334,14 @@ video_thread(void *arg)
 		atomic_lock();
 		if ((uint32_t)pcvi->buf.bytesused <= pcvi->framesize) {
 			memcpy(pcvi->framebuffer,
-			    pcvi->addr[pcvi->buf.index], pcvi->framesize);
-			memset((char *)pcvi->framebuffer + (uint32_t)pcvi->buf.bytesused, 0,
-			    pcvi->framesize - (uint32_t)pcvi->buf.bytesused);
+			    pcvi->addr[pcvi->buf.index], pcvi->buf.bytesused);
+			pcvi->framebytesused = pcvi->buf.bytesused;
 		} else {
-			memset(pcvi->framebuffer, 0, pcvi->framesize);
+			pcvi->framebytesused = 0;
+		}
+		if (do_unref != 0) {
+			wait_init--;
+			do_unref = 0;
 		}
 		atomic_unlock();
 
@@ -280,6 +374,15 @@ audio_thread(void *arg)
 	int i;
 	int num;
 	int curr;
+
+	atomic_lock();
+	wait_init--;
+	while (wait_init != 0) {
+		atomic_unlock();
+		usleep(1000);
+		atomic_lock();
+	}
+	atomic_unlock();
 
 	pcai->fd = open(pcai->devname, O_RDONLY);
 	if (pcai->fd < 0)
@@ -345,15 +448,6 @@ audio_thread(void *arg)
 	if (pcai->framebuffer == NULL)
 		errx(EX_SOFTWARE, "%s: Cannot allocate buffer", pcai->devname);
 
-	atomic_lock();
-	wait_init--;
-	while (wait_init != 0) {
-		atomic_unlock();
-		usleep(1000);
-		atomic_lock();
-	}
-	atomic_unlock();
-
 	num = 0;
 	curr = 0;
 
@@ -365,11 +459,27 @@ audio_thread(void *arg)
 		}
 		for (i = 0; i != nvideo; i++) {
 			char cmdbuf[256];
+			char sizebuf[128];
+			int j;
 
-			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -f rawvideo -pix_fmt yuyv422 -framerate %f "
-			    "-video_size %dx%d -i /dev/stdin "
-			    "-vcodec huffyuv -vsync -1 -loglevel quiet -f matroska -y %s_camera_%d.mkv",
-			    (float)pcai->fps, (int)vc_info[i].width, (int)vc_info[i].height, default_prefix, i);
+			for (j = 0; format_table[j].codec_str != NULL; j++) {
+				if (format_table[j].pixfmt == vc_info[i].fmt.fmt.pix.pixelformat)
+					break;
+			}
+			if (format_table[j].codec_str == NULL)
+				errx(EX_SOFTWARE, "%s: Unsupported V4L2 pixel format", vc_info[i].devname);
+
+			if (format_table[j].pixfmt_str[0] != 0) {
+				snprintf(sizebuf, sizeof(sizebuf), "-video_size %dx%d -pix_fmt %s",
+				    (int)vc_info[i].width, (int)vc_info[i].height,
+				    format_table[j].pixfmt_str);
+			} else {
+				sizebuf[0] = 0;
+			}
+
+			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -f %s %s -framerate %f "
+			    " -i /dev/stdin -vcodec huffyuv -vsync -1 -f matroska -y %s_camera_%d.mkv",
+			    format_table[j].codec_str, sizebuf, (float)pcai->fps, default_prefix, i);
 			printf("CMD: %s\n", cmdbuf);
 			vc_info[i].pipe = create_piped_process(cmdbuf, &vc_info[i].pid);
 		}
@@ -399,8 +509,12 @@ audio_thread(void *arg)
 			if (++curr == num) {
 				atomic_lock();
 				for (i = 0; i != nvideo; i++) {
-					error = write(vc_info[i].pipe, vc_info[i].framebuffer, vc_info[i].framesize);
-					if (error != (int)vc_info[i].framesize)
+					if (vc_info[i].framebytesused == 0)
+						continue;
+					error = write(vc_info[i].pipe,
+					    vc_info[i].framebuffer,
+					    vc_info[i].framebytesused);
+					if (error != (int)vc_info[i].framebytesused)
 						errx(EX_SOFTWARE, "%s: Could not write to pipe", pcai->devname);
 				}
 				curr = 0;
