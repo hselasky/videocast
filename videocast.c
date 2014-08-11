@@ -288,7 +288,7 @@ audio_thread(void *arg)
 	if (1) {
 		char fname[128];
 
-		snprintf(fname, sizeof(fname), "%s_audio_%d.wav", default_prefix, ac_info - pcai);
+		snprintf(fname, sizeof(fname), "%s_audio_%d.wav", default_prefix, (int)(pcai - ac_info));
 
 		pcai->out_fd = open(fname, O_WRONLY | O_TRUNC | O_CREAT, 0600);
 		if (pcai->out_fd < 0)
