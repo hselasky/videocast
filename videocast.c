@@ -1,0 +1,499 @@
+/*-
+ * Copyright (c) 2014 Hans Petter Selasky. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+#include <stdio.h>
+#include <stdint.h>
+#include <sys/endian.h>
+#include <sys/soundcard.h>
+#include <linux/videodev2.h>
+#include <pthread.h>
+#include <signal.h>
+#include <sysexits.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <err.h>
+
+#define	NBUFFER 4
+#define	NVIDEODEV 16
+#define	NAUDIODEV 16
+
+struct vc_info {
+	void   *framebuffer;
+	uint32_t framesize;
+	const char *devname;
+	void   *addr[NBUFFER];
+	int	fd;
+	int	pipe;
+	int	pid;
+	uint16_t width;
+	uint16_t height;
+	struct v4l2_capability cap;
+	struct v4l2_format fmt;
+	struct v4l2_buffer buf;
+	struct v4l2_requestbuffers rb;
+};
+
+struct ac_info {
+	void   *framebuffer;
+	uint32_t framesize;
+	const char *devname;
+	double	fps;
+	int	fd;
+	int	out_fd;
+	uint32_t channels;
+	uint32_t bits;
+	uint32_t speed;
+	off_t	bytes;
+};
+
+static struct vc_info vc_info[NVIDEODEV];
+static struct ac_info ac_info[NAUDIODEV];
+static pthread_mutex_t atomic_mtx;
+static int nvideo;
+static int naudio;
+static int wait_init;
+static int default_width = 640;
+static int default_height = 480;
+static int default_rate = 96000;
+static const char *default_prefix = "project";
+
+static int write_le32(int, uint32_t);
+
+static void
+atomic_lock(void)
+{
+	pthread_mutex_lock(&atomic_mtx);
+}
+
+static void
+atomic_unlock(void)
+{
+	pthread_mutex_unlock(&atomic_mtx);
+}
+
+static void
+do_atexit(void)
+{
+	off_t off;
+	int i;
+	int f;
+
+	for (i = 0; i != nvideo; i++) {
+		if (vc_info[i].pid != 0)
+			kill(vc_info[i].pid, SIGKILL);
+	}
+}
+
+static void
+close_fds(void)
+{
+	int i;
+
+	for (i = 0; i != nvideo; i++) {
+		if (vc_info[i].fd > 0)
+			close(vc_info[i].fd);
+		if (vc_info[i].pipe > 0)
+			close(vc_info[i].pipe);
+	}
+	for (i = 0; i != naudio; i++) {
+		if (ac_info[i].fd > 0)
+			close(ac_info[i].fd);
+		if (ac_info[i].out_fd > 0)
+			close(ac_info[i].out_fd);
+	}
+}
+
+static int
+create_piped_process(const char *cmd, int *ppid)
+{
+	int fds[2];
+
+	if (pipe(fds) != 0)
+		errx(EX_SOFTWARE, "Could not create pipe");
+
+	if ((*ppid = fork()) == 0) {
+		close_fds();
+		dup2(fds[0], 0);
+		close(fds[1]);
+		close(fds[0]);
+		system(cmd);
+		exit(0);
+	} else {
+		close(fds[0]);
+	}
+
+	return (fds[1]);
+}
+
+static void *
+video_thread(void *arg)
+{
+	struct vc_info *pcvi = arg;
+	int error;
+	int i;
+
+	/* standard V4L2 setup */
+
+	pcvi->fd = open(pcvi->devname, O_RDWR);
+	if (pcvi->fd < 0)
+		errx(EX_SOFTWARE, "Cannot open device '%s'", pcvi->devname);
+
+	error = ioctl(pcvi->fd, VIDIOC_QUERYCAP, &pcvi->cap);
+	if (error != 0)
+		errx(EX_SOFTWARE, "%s: Cannot query capabilities", pcvi->devname);
+
+	if (!(pcvi->cap.capabilities & V4L2_CAP_STREAMING))
+		errx(EX_SOFTWARE, "%s: Device doesn't support mmap", pcvi->devname);
+
+	pcvi->fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	pcvi->fmt.fmt.pix.width = pcvi->width;
+	pcvi->fmt.fmt.pix.height = pcvi->height;
+	pcvi->fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+	pcvi->fmt.fmt.pix.field = V4L2_FIELD_ANY;
+	error = ioctl(pcvi->fd, VIDIOC_S_FMT, &pcvi->fmt);
+	if (error != 0)
+		errx(EX_SOFTWARE, "%s: Cannot set format", pcvi->devname);
+
+	pcvi->width = pcvi->fmt.fmt.pix.width;
+	pcvi->height = pcvi->fmt.fmt.pix.height;
+
+	pcvi->rb.count = NBUFFER;
+	pcvi->rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	pcvi->rb.memory = V4L2_MEMORY_MMAP;
+
+	error = ioctl(pcvi->fd, VIDIOC_REQBUFS, &pcvi->rb);
+	if (error != 0)
+		errx(EX_SOFTWARE, "%s: Cannot request buffers", pcvi->devname);
+
+	for (i = 0; i != NBUFFER; i++) {
+		pcvi->buf.index = i;
+		pcvi->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		pcvi->buf.memory = V4L2_MEMORY_MMAP;
+		error = ioctl(pcvi->fd, VIDIOC_QUERYBUF, &pcvi->buf);
+		if (error != 0)
+			errx(EX_SOFTWARE, "%s: Cannot query buffer", pcvi->devname);
+		pcvi->addr[i] = mmap(0,
+		    pcvi->buf.length, PROT_READ, MAP_SHARED, pcvi->fd,
+		    pcvi->buf.m.offset);
+		if (pcvi->addr[i] == MAP_FAILED)
+			errx(EX_SOFTWARE, "%s: Cannot mmap buffer", pcvi->devname);
+	}
+	for (i = 0; i != NBUFFER; i++) {
+		pcvi->buf.index = i;
+		pcvi->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		pcvi->buf.memory = V4L2_MEMORY_MMAP;
+		error = ioctl(pcvi->fd, VIDIOC_QBUF, &pcvi->buf);
+		if (error != 0)
+			errx(EX_SOFTWARE, "%s: Cannot queue buffer", pcvi->devname);
+	}
+
+	pcvi->framesize = pcvi->width * pcvi->height * 2;
+	pcvi->framebuffer = malloc(pcvi->framesize);
+	if (pcvi->framebuffer == NULL)
+		errx(EX_SOFTWARE, "%s: Cannot allocate memory", pcvi->devname);
+
+	memset(pcvi->framebuffer, 0, sizeof(pcvi->framebuffer));
+
+	atomic_lock();
+	wait_init--;
+	while (wait_init != 0) {
+		atomic_unlock();
+		usleep(1000);
+		atomic_lock();
+	}
+	atomic_unlock();
+
+	i = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	error = ioctl(pcvi->fd, VIDIOC_STREAMON, &i);
+	if (error != 0)
+		errx(EX_SOFTWARE, "%s: Cannot enable stream", pcvi->devname);
+
+	while (1) {
+		pcvi->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		pcvi->buf.memory = V4L2_MEMORY_MMAP;
+		error = ioctl(pcvi->fd, VIDIOC_DQBUF, &pcvi->buf);
+		if (error != 0)
+			errx(EX_SOFTWARE, "%s: Cannot dequeue buffer", pcvi->devname);
+
+		atomic_lock();
+		if ((uint32_t)pcvi->buf.bytesused <= pcvi->framesize) {
+			memcpy(pcvi->framebuffer,
+			    pcvi->addr[pcvi->buf.index], pcvi->framesize);
+			memset((char *)pcvi->framebuffer + (uint32_t)pcvi->buf.bytesused, 0,
+			    pcvi->framesize - (uint32_t)pcvi->buf.bytesused);
+		} else {
+			memset(pcvi->framebuffer, 0, pcvi->framesize);
+		}
+		atomic_unlock();
+
+		error = ioctl(pcvi->fd, VIDIOC_QBUF, &pcvi->buf);
+		if (error != 0)
+			errx(EX_SOFTWARE, "%s: Cannot enqueue buffer", pcvi->devname);
+	}
+	return (NULL);
+}
+
+static int
+write_le32(int fd, uint32_t val)
+{
+	val = htole32(val);
+	return (write(fd, &val, sizeof(val)));
+}
+
+static int
+write_le16(int fd, uint16_t val)
+{
+	val = htole16(val);
+	return (write(fd, &val, sizeof(val)));
+}
+
+static void *
+audio_thread(void *arg)
+{
+	struct ac_info *pcai = arg;
+	int error;
+	int i;
+	int num;
+	int curr;
+
+	pcai->fd = open(pcai->devname, O_RDONLY);
+	if (pcai->fd < 0)
+		errx(EX_SOFTWARE, "Cannot open device '%s'", pcai->devname);
+
+	if (1) {
+		char fname[128];
+
+		snprintf(fname, sizeof(fname), "%s_audio_%d.wav", default_prefix, ac_info - pcai);
+
+		pcai->out_fd = open(fname, O_WRONLY | O_TRUNC | O_CREAT, 0600);
+		if (pcai->out_fd < 0)
+			errx(EX_SOFTWARE, "Cannot open device '%s'", fname);
+	}
+	i = 0;
+	error = ioctl(pcai->fd, FIONBIO, &i);
+	if (error != 0)
+		errx(EX_SOFTWARE, "%s: Cannot set blocking behaviour", pcai->devname);
+
+	i = 0;
+	error = ioctl(pcai->fd, SNDCTL_DSP_GETFMTS, &i);
+	if (error != 0)
+		errx(EX_SOFTWARE, "%s: Cannot get format", pcai->devname);
+	if (i & AFMT_S32_LE) {
+		pcai->bits = 32;
+		i = AFMT_S32_LE;
+	} else if (i & AFMT_S24_LE) {
+		pcai->bits = 24;
+		i = AFMT_S24_LE;
+	} else if (i & AFMT_S16_LE) {
+		pcai->bits = 16;
+		i = AFMT_S16_LE;
+	} else if (i & AFMT_S8) {
+		pcai->bits = 8;
+		i = AFMT_S8;
+	} else {
+		errx(EX_SOFTWARE, "%s: No supported formats", pcai->devname);
+	}
+	error = ioctl(pcai->fd, SNDCTL_DSP_SETFMT, &i);
+	if (error != 0)
+		errx(EX_SOFTWARE, "%s: Cannot set format", pcai->devname);
+
+	i = 2;
+	error = ioctl(pcai->fd, SOUND_PCM_READ_CHANNELS, &i);
+	if (error != 0)
+		errx(EX_SOFTWARE, "%s: Cannot set read channels", pcai->devname);
+
+	pcai->channels = i;
+
+	i = default_rate;
+	error = ioctl(pcai->fd, SNDCTL_DSP_SPEED, &i);
+	if (error != 0)
+		errx(EX_SOFTWARE, "%s: Cannot set sample rate", pcai->devname);
+
+	pcai->speed = i;
+	i = 0;
+	error = ioctl(pcai->fd, SNDCTL_DSP_GETBLKSIZE, &i);
+	if (error != 0 || i == 0)
+		errx(EX_SOFTWARE, "%s: Cannot get buffer block size", pcai->devname);
+
+	pcai->framesize = i;
+	pcai->framebuffer = malloc(i);
+	if (pcai->framebuffer == NULL)
+		errx(EX_SOFTWARE, "%s: Cannot allocate buffer", pcai->devname);
+
+	atomic_lock();
+	wait_init--;
+	while (wait_init != 0) {
+		atomic_unlock();
+		usleep(1000);
+		atomic_lock();
+	}
+	atomic_unlock();
+
+	num = 0;
+	curr = 0;
+
+	if (pcai == ac_info) {
+		for (num = 1;; num++) {
+			pcai->fps = (float)(pcai->speed * pcai->channels * (pcai->bits / 8)) / (float)(pcai->framesize * num);
+			if (pcai->fps <= 25)
+				break;
+		}
+		for (i = 0; i != nvideo; i++) {
+			char cmdbuf[256];
+
+			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -f rawvideo -pix_fmt yuyv422 -framerate %f "
+			    "-video_size %dx%d -i /dev/stdin "
+			    "-vcodec huffyuv -vsync -1 -loglevel quiet -f matroska -y %s_camera_%d.mkv",
+			    (float)pcai->fps, (int)vc_info[i].width, (int)vc_info[i].height, default_prefix, i);
+			printf("CMD: %s\n", cmdbuf);
+			vc_info[i].pipe = create_piped_process(cmdbuf, &vc_info[i].pid);
+		}
+	}
+	if (write(pcai->out_fd, "RIFF", 4) != 4 ||
+	    write_le32(pcai->out_fd, 36 - 8) != 4 ||
+	    write(pcai->out_fd, "WAVEfmt ", 8) != 8 ||
+	    write_le32(pcai->out_fd, 16U) != 4 ||
+	    write_le16(pcai->out_fd, 1U) != 2 ||
+	    write_le16(pcai->out_fd, pcai->channels) != 2 ||
+	    write_le32(pcai->out_fd, pcai->speed) != 4 ||
+	    write_le32(pcai->out_fd, pcai->speed * pcai->channels * (pcai->bits / 8)) != 4 ||
+	    write_le16(pcai->out_fd, pcai->channels * (pcai->bits / 8)) != 2 ||
+	    write_le16(pcai->out_fd, pcai->bits) != 2 ||
+	    write(pcai->out_fd, "data", 4) != 4 ||
+	    write_le32(pcai->out_fd, -(pcai->bits / 8)) != 4)
+		errx(EX_SOFTWARE, "%s: Could not write WAV header", pcai->devname);
+
+	pcai->bytes += 44;
+
+	while (1) {
+		error = read(pcai->fd, pcai->framebuffer, pcai->framesize);
+		if (error != pcai->framesize)
+			errx(EX_SOFTWARE, "%s: Could not read from DSP device", pcai->devname);
+
+		if (pcai == ac_info) {
+			if (++curr == num) {
+				atomic_lock();
+				for (i = 0; i != nvideo; i++) {
+					error = write(vc_info[i].pipe, vc_info[i].framebuffer, vc_info[i].framesize);
+					if (error != (int)vc_info[i].framesize)
+						errx(EX_SOFTWARE, "%s: Could not write to pipe", pcai->devname);
+				}
+				curr = 0;
+				atomic_unlock();
+			}
+		}
+		error = write(pcai->out_fd, pcai->framebuffer, pcai->framesize);
+		if (error != pcai->framesize)
+			errx(EX_SOFTWARE, "%s: Could not write to file", pcai->devname);
+
+		atomic_lock();
+		pcai->bytes += pcai->framesize;
+		atomic_unlock();
+
+		if (pcai->bytes >= (1ULL << 31))
+			errx(EX_SOFTWARE, "%s: File too big", pcai->devname);
+	}
+	return (NULL);
+}
+
+static void
+usage(void)
+{
+	fprintf(stderr, "usage: videocast [-w 640] [-h 480] "
+	    "[-r 96000] [-p prefix] -v /dev/video0 -d /dev/dsp\n");
+	exit(0);
+}
+
+int
+main(int argc, char **argv)
+{
+	int c;
+
+	atexit(&do_atexit);
+
+	pthread_mutex_init(&atomic_mtx, NULL);
+
+	while ((c = getopt(argc, argv, "w:h:v:d:p:")) != -1) {
+		switch (c) {
+		case 'w':
+			default_width = atoi(optarg);
+			break;
+		case 'h':
+			default_height = atoi(optarg);
+			break;
+		case 'r':
+			default_rate = atoi(optarg);
+			break;
+		case 'p':
+			default_prefix = optarg;
+			break;
+		case 'v':
+			if (nvideo == NVIDEODEV)
+				errx(EX_SOFTWARE, "Too many video devices");
+			vc_info[nvideo].devname = optarg;
+			vc_info[nvideo].width = default_width;
+			vc_info[nvideo].height = default_height;
+			nvideo++;
+			break;
+		case 'd':
+			if (naudio == NAUDIODEV)
+				errx(EX_SOFTWARE, "Too many audio devices");
+			ac_info[naudio].devname = optarg;
+			naudio++;
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (nvideo == 0 || naudio == 0)
+		usage();
+
+	wait_init = naudio + nvideo;
+
+	for (c = 0; c != nvideo; c++) {
+		pthread_t dummy;
+
+		if (pthread_create(&dummy, NULL, &video_thread, vc_info + c))
+			errx(EX_SOFTWARE, "Couldn't create thread");
+	}
+
+	for (c = 0; c != naudio; c++) {
+		pthread_t dummy;
+
+		if (pthread_create(&dummy, NULL, &audio_thread, ac_info + c))
+			errx(EX_SOFTWARE, "Couldn't create thread");
+	}
+
+	printf("Press CTRL+C to complete recording\n");
+
+	while (1)
+		usleep(1000000);
+
+	return (0);
+}
