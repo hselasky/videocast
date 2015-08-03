@@ -495,7 +495,7 @@ audio_thread(void *arg)
 	    write_le16(pcai->out_fd, pcai->channels * (pcai->bits / 8)) != 2 ||
 	    write_le16(pcai->out_fd, pcai->bits) != 2 ||
 	    write(pcai->out_fd, "data", 4) != 4 ||
-	    write_le32(pcai->out_fd, -(pcai->bits / 8)) != 4)
+	    write_le32(pcai->out_fd, 0x7ffff000U /* unspecified length */) != 4)
 		errx(EX_SOFTWARE, "%s: Could not write WAV header", pcai->devname);
 
 	pcai->bytes += 44;
