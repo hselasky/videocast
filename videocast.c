@@ -552,7 +552,7 @@ main(int argc, char **argv)
 
 	pthread_mutex_init(&atomic_mtx, NULL);
 
-	while ((c = getopt(argc, argv, "w:h:v:d:p:")) != -1) {
+	while ((c = getopt(argc, argv, "w:h:v:d:p:r:")) != -1) {
 		switch (c) {
 		case 'w':
 			default_width = atoi(optarg);
