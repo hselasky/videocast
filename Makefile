@@ -7,5 +7,9 @@ MAN=
 CFLAGS=-I${LOCALBASE}/include
 SRCS+= videocast.c
 LDFLAGS+= ${PTHREAD_LIBS}
+.if defined(HAVE_X11_SUPPORT)
+LDFLAGS+= -L${LOCALBASE}/lib -lX11
+CFLAGS+= -DHAVE_X11_SUPPORT
+.endif
 
 .include <bsd.prog.mk>

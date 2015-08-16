@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014 Hans Petter Selasky. All rights reserved.
+ * Copyright (c) 2014-2015 Hans Petter Selasky. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -25,6 +25,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <ctype.h>
 #include <sys/endian.h>
 #include <sys/soundcard.h>
 #include <linux/videodev2.h>
@@ -37,6 +38,12 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <err.h>
+
+#ifdef HAVE_X11_SUPPORT
+#include <X11/Xatom.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#endif
 
 #define	NBUFFER 4
 #define	NVIDEODEV 16
@@ -175,6 +182,7 @@ static int wait_init;
 static int default_width = 640;
 static int default_height = 480;
 static int default_rate = 96000;
+static int default_blocksize = -1;
 static const char *default_prefix = "project";
 
 static int write_le32(int, uint32_t);
@@ -244,6 +252,95 @@ create_piped_process(const char *cmd, int *ppid)
 
 	return (fds[1]);
 }
+
+#ifdef HAVE_X11_SUPPORT
+static void *
+x11_thread(void *arg)
+{
+	struct vc_info *pcvi = arg;
+	XWindowAttributes win_info;
+	Window window = strtoul(pcvi->devname, NULL, 0);
+	const char *display_name = NULL;
+	Display *dpy;
+	int screen;
+	int do_unref = 1;
+
+	dpy = XOpenDisplay(display_name);
+	if (dpy == NULL)
+		errx(1, "Unable to open display '%s'", XDisplayName(display_name));
+	screen = XDefaultScreen(dpy);
+
+	if (XGetWindowAttributes(dpy, window, &win_info) == 0)
+		errx(1, "Unable to get target window attributes");
+
+	pcvi->width = win_info.width;
+	pcvi->height = win_info.height;
+
+	while (1) {
+		Window dummy;
+		size_t buffer_size;
+		XImage *image;
+		int absx, absy;
+
+		usleep(1000000 / 5);	/* 5Hz */
+
+		if (!XTranslateCoordinates(dpy, window, RootWindow(dpy, screen), 0, 0,
+		    &absx, &absy, &dummy))
+			continue;
+		win_info.x = absx;
+		win_info.y = absy;
+
+		image = XGetImage(dpy, RootWindow(dpy, screen), win_info.x, win_info.y,
+		    win_info.width, win_info.height, AllPlanes, ZPixmap);
+		if (image == NULL)
+			continue;
+
+		buffer_size = (image->bytes_per_line * image->height);
+
+		atomic_lock();
+		if (do_unref != 0) {
+			switch (image->bits_per_pixel) {
+			case 32:
+				pcvi->fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_BGR32;
+				break;
+			case 24:
+				pcvi->fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_BGR24;
+				break;
+			case 16:
+				pcvi->fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB565X;
+				break;
+			case 15:
+				pcvi->fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB555X;
+				break;
+			default:
+				errx(1, "Unsupported pixel format");
+			}
+
+			pcvi->framesize = ((image->bits_per_pixel + 7) / 8) *
+			    pcvi->width * pcvi->height;
+			pcvi->framebuffer = malloc(pcvi->framesize);
+			if (pcvi->framebuffer == NULL)
+				errx(EX_SOFTWARE, "Cannot allocate memory");
+			memset(pcvi->framebuffer, 0, pcvi->framesize);
+		}
+		if (buffer_size == pcvi->framesize) {
+			memcpy(pcvi->framebuffer, image->data, buffer_size);
+			pcvi->framebytesused = buffer_size;
+		} else {
+			pcvi->framebytesused = 0;
+		}
+		if (do_unref) {
+			wait_init--;
+			do_unref = 0;
+		}
+		atomic_unlock();
+
+		XDestroyImage(image);
+	}
+	return (NULL);
+}
+
+#endif
 
 static void *
 video_thread(void *arg)
@@ -317,7 +414,7 @@ video_thread(void *arg)
 	if (pcvi->framebuffer == NULL)
 		errx(EX_SOFTWARE, "%s: Cannot allocate memory", pcvi->devname);
 
-	memset(pcvi->framebuffer, 0, sizeof(pcvi->framebuffer));
+	memset(pcvi->framebuffer, 0, pcvi->framesize);
 
 	i = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	error = ioctl(pcvi->fd, VIDIOC_STREAMON, &i);
@@ -409,15 +506,19 @@ audio_thread(void *arg)
 	if (i & AFMT_S32_LE) {
 		pcai->bits = 32;
 		i = AFMT_S32_LE;
+		default_blocksize *= 4;
 	} else if (i & AFMT_S24_LE) {
 		pcai->bits = 24;
 		i = AFMT_S24_LE;
+		default_blocksize *= 3;
 	} else if (i & AFMT_S16_LE) {
 		pcai->bits = 16;
 		i = AFMT_S16_LE;
+		default_blocksize *= 2;
 	} else if (i & AFMT_S8) {
 		pcai->bits = 8;
 		i = AFMT_S8;
+		default_blocksize *= 1;
 	} else {
 		errx(EX_SOFTWARE, "%s: No supported formats", pcai->devname);
 	}
@@ -438,6 +539,11 @@ audio_thread(void *arg)
 		errx(EX_SOFTWARE, "%s: Cannot set sample rate", pcai->devname);
 
 	pcai->speed = i;
+	if (default_blocksize > 0) {
+		i = default_blocksize;
+	  	error = ioctl(pcai->fd, SNDCTL_DSP_SETBLKSIZE, &i);
+	}
+
 	i = 0;
 	error = ioctl(pcai->fd, SNDCTL_DSP_GETBLKSIZE, &i);
 	if (error != 0 || i == 0)
@@ -495,7 +601,7 @@ audio_thread(void *arg)
 	    write_le16(pcai->out_fd, pcai->channels * (pcai->bits / 8)) != 2 ||
 	    write_le16(pcai->out_fd, pcai->bits) != 2 ||
 	    write(pcai->out_fd, "data", 4) != 4 ||
-	    write_le32(pcai->out_fd, 0x7ffff000U /* unspecified length */) != 4)
+	    write_le32(pcai->out_fd, 0x7ffff000U /* unspecified length */ ) != 4)
 		errx(EX_SOFTWARE, "%s: Could not write WAV header", pcai->devname);
 
 	pcai->bytes += 44;
@@ -538,8 +644,8 @@ audio_thread(void *arg)
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: videocast [-w 640] [-h 480] "
-	    "[-r 96000] [-p prefix] -v /dev/video0 -d /dev/dsp\n");
+	fprintf(stderr, "usage: videocast [-w 640] [-h 480] [ -b 8000 ] "
+	    "[-r 96000] [-p prefix] [-v /dev/video0] [-v 0xXXXXXXXX] -d /dev/dsp\n");
 	exit(0);
 }
 
@@ -552,8 +658,11 @@ main(int argc, char **argv)
 
 	pthread_mutex_init(&atomic_mtx, NULL);
 
-	while ((c = getopt(argc, argv, "w:h:v:d:p:r:")) != -1) {
+	while ((c = getopt(argc, argv, "w:h:v:d:p:r:b:")) != -1) {
 		switch (c) {
+		case 'b':
+			default_blocksize = atoi(optarg);
+			break;
 		case 'w':
 			default_width = atoi(optarg);
 			break;
@@ -593,8 +702,15 @@ main(int argc, char **argv)
 	for (c = 0; c != nvideo; c++) {
 		pthread_t dummy;
 
-		if (pthread_create(&dummy, NULL, &video_thread, vc_info + c))
-			errx(EX_SOFTWARE, "Couldn't create thread");
+		if (isdigit(vc_info[c].devname[0])) {
+#ifdef HAVE_X11_SUPPORT
+			if (pthread_create(&dummy, NULL, &x11_thread, vc_info + c))
+				errx(EX_SOFTWARE, "Couldn't create thread");
+#endif
+		} else {
+			if (pthread_create(&dummy, NULL, &video_thread, vc_info + c))
+				errx(EX_SOFTWARE, "Couldn't create thread");
+		}
 	}
 
 	for (c = 0; c != naudio; c++) {
