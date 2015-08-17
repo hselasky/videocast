@@ -181,8 +181,8 @@ static int naudio;
 static int wait_init;
 static int default_width = 640;
 static int default_height = 480;
-static int default_rate = 96000;
-static int default_blocksize = -1;
+static int default_rate = 48000;
+static int default_blocksize = 4000;
 static const char *default_prefix = "project";
 
 static int write_le32(int, uint32_t);
@@ -264,6 +264,7 @@ x11_thread(void *arg)
 	Display *dpy;
 	int screen;
 	int do_unref = 1;
+	int us_delay;
 
 	dpy = XOpenDisplay(display_name);
 	if (dpy == NULL)
@@ -276,13 +277,27 @@ x11_thread(void *arg)
 	pcvi->width = win_info.width;
 	pcvi->height = win_info.height;
 
+	if (default_blocksize <= 0)
+		errx(1, "Blocksize is invalid");
+	if (default_rate <= 0)
+		errx(1, "Samplerate is invalid");
+
+	/* compute a reasonable delay to wait for frame capturing */
+	us_delay = default_rate / default_blocksize;
+	if (us_delay < 1)
+		us_delay = 1;
+	us_delay = 1000000 / us_delay;
+	us_delay = us_delay - (us_delay >> 4);
+	if (us_delay < 1)
+		us_delay = 1;
+
 	while (1) {
 		Window dummy;
 		size_t buffer_size;
 		XImage *image;
 		int absx, absy;
 
-		usleep(1000000 / 5);	/* 5Hz */
+		usleep(us_delay);
 
 		if (!XTranslateCoordinates(dpy, window, RootWindow(dpy, screen), 0, 0,
 		    &absx, &absy, &dummy))
@@ -539,16 +554,11 @@ audio_thread(void *arg)
 		errx(EX_SOFTWARE, "%s: Cannot set sample rate", pcai->devname);
 
 	pcai->speed = i;
-	if (default_blocksize > 0) {
-		i = default_blocksize;
-	  	error = ioctl(pcai->fd, SNDCTL_DSP_SETBLKSIZE, &i);
-	}
 
-	i = 0;
-	error = ioctl(pcai->fd, SNDCTL_DSP_GETBLKSIZE, &i);
-	if (error != 0 || i == 0)
-		errx(EX_SOFTWARE, "%s: Cannot get buffer block size", pcai->devname);
-
+	i = default_blocksize;
+	if (i < 1)
+		errx(EX_SOFTWARE, "%s: Invalid block size %d", pcai->devname, i);
+	error = ioctl(pcai->fd, SNDCTL_DSP_SETBLKSIZE, &i);
 	pcai->framesize = i;
 	pcai->framebuffer = malloc(i);
 	if (pcai->framebuffer == NULL)
@@ -583,7 +593,7 @@ audio_thread(void *arg)
 				sizebuf[0] = 0;
 			}
 
-			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -f %s %s -framerate %f "
+			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -loglevel quiet -f %s %s -framerate %f "
 			    " -i /dev/stdin -vcodec huffyuv -vsync -1 -f matroska -y %s_camera_%d.mkv",
 			    format_table[j].codec_str, sizebuf, (float)pcai->fps, default_prefix, i);
 			printf("CMD: %s\n", cmdbuf);
@@ -720,10 +730,18 @@ main(int argc, char **argv)
 			errx(EX_SOFTWARE, "Couldn't create thread");
 	}
 
+	atomic_lock();
+	while (wait_init != 0) {
+		atomic_unlock();
+		usleep(1000);
+		atomic_lock();
+	}
+	atomic_unlock();
+
 	printf("Press CTRL+C to complete recording\n");
 
 	while (1)
-		usleep(1000000);
+		pause();
 
 	return (0);
 }
