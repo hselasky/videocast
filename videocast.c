@@ -182,7 +182,7 @@ static int wait_init;
 static int default_width = 640;
 static int default_height = 480;
 static int default_rate = 48000;
-static int default_blocksize = 4000;
+static int default_blocksize = 2000;	/* 24 FPS is default */
 static const char *default_prefix = "project";
 
 static int write_le32(int, uint32_t);
@@ -484,8 +484,6 @@ audio_thread(void *arg)
 	struct ac_info *pcai = arg;
 	int error;
 	int i;
-	int num;
-	int curr;
 
 	atomic_lock();
 	wait_init--;
@@ -521,19 +519,15 @@ audio_thread(void *arg)
 	if (i & AFMT_S32_LE) {
 		pcai->bits = 32;
 		i = AFMT_S32_LE;
-		default_blocksize *= 4;
 	} else if (i & AFMT_S24_LE) {
 		pcai->bits = 24;
 		i = AFMT_S24_LE;
-		default_blocksize *= 3;
 	} else if (i & AFMT_S16_LE) {
 		pcai->bits = 16;
 		i = AFMT_S16_LE;
-		default_blocksize *= 2;
 	} else if (i & AFMT_S8) {
 		pcai->bits = 8;
 		i = AFMT_S8;
-		default_blocksize *= 1;
 	} else {
 		errx(EX_SOFTWARE, "%s: No supported formats", pcai->devname);
 	}
@@ -555,24 +549,17 @@ audio_thread(void *arg)
 
 	pcai->speed = i;
 
-	i = default_blocksize;
+	i = pcai->channels * default_blocksize;
 	if (i < 1)
 		errx(EX_SOFTWARE, "%s: Invalid block size %d", pcai->devname, i);
 	error = ioctl(pcai->fd, SNDCTL_DSP_SETBLKSIZE, &i);
-	pcai->framesize = i;
+	pcai->framesize = i * (pcai->bits / 8);
 	pcai->framebuffer = malloc(i);
 	if (pcai->framebuffer == NULL)
 		errx(EX_SOFTWARE, "%s: Cannot allocate buffer", pcai->devname);
 
-	num = 0;
-	curr = 0;
-
 	if (pcai == ac_info) {
-		for (num = 1;; num++) {
-			pcai->fps = (float)(pcai->speed * pcai->channels * (pcai->bits / 8)) / (float)(pcai->framesize * num);
-			if (pcai->fps <= 25)
-				break;
-		}
+		pcai->fps = (double)default_rate / (double)default_blocksize;
 		for (i = 0; i != nvideo; i++) {
 			char cmdbuf[256];
 			char sizebuf[128];
@@ -622,20 +609,17 @@ audio_thread(void *arg)
 			errx(EX_SOFTWARE, "%s: Could not read from DSP device", pcai->devname);
 
 		if (pcai == ac_info) {
-			if (++curr == num) {
-				atomic_lock();
-				for (i = 0; i != nvideo; i++) {
-					if (vc_info[i].framebytesused == 0)
-						continue;
-					error = write(vc_info[i].pipe,
-					    vc_info[i].framebuffer,
-					    vc_info[i].framebytesused);
-					if (error != (int)vc_info[i].framebytesused)
-						errx(EX_SOFTWARE, "%s: Could not write to pipe", pcai->devname);
-				}
-				curr = 0;
-				atomic_unlock();
+			atomic_lock();
+			for (i = 0; i != nvideo; i++) {
+				if (vc_info[i].framebytesused == 0)
+					continue;
+				error = write(vc_info[i].pipe,
+				    vc_info[i].framebuffer,
+				    vc_info[i].framebytesused);
+				if (error != (int)vc_info[i].framebytesused)
+					errx(EX_SOFTWARE, "%s: Could not write to pipe", pcai->devname);
 			}
+			atomic_unlock();
 		}
 		error = write(pcai->out_fd, pcai->framebuffer, pcai->framesize);
 		if (error != pcai->framesize)
