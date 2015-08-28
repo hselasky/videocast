@@ -36,6 +36,7 @@
 #include <string.h>
 #include <sys/fcntl.h>
 #include <sys/mman.h>
+#include <sys/queue.h>
 #include <unistd.h>
 #include <err.h>
 
@@ -49,98 +50,52 @@
 #define	NVIDEODEV 16
 #define	NAUDIODEV 16
 
+struct data;
+typedef TAILQ_HEAD(,data) head_t;
+struct data {
+	TAILQ_ENTRY(data) entry;
+	int fd;
+	int bytes;
+	uint8_t data[0];
+};
+
+static head_t data_head = TAILQ_HEAD_INITIALIZER(data_head);
+
 /* the following table was imported from ffmpeg's V4L2 driver */
 
 static const struct {
 	const char *const pixfmt_str;
 	const char *const codec_str;
 	uint32_t pixfmt;
-}	format_table[] = {
-
-	{
-		"yuv420p", "rawvideo", V4L2_PIX_FMT_YUV420
-	},
-	{
-		"yuv420p", "rawvideo", V4L2_PIX_FMT_YVU420
-	},
-	{
-		"yuv422p", "rawvideo", V4L2_PIX_FMT_YUV422P
-	},
-	{
-		"yuyv422", "rawvideo", V4L2_PIX_FMT_YUYV
-	},
-	{
-		"uyvy422", "rawvideo", V4L2_PIX_FMT_UYVY
-	},
-	{
-		"yuv411p", "rawvideo", V4L2_PIX_FMT_YUV411P
-	},
-	{
-		"yuv410p", "rawvideo", V4L2_PIX_FMT_YUV410
-	},
-	{
-		"yuv410p", "rawvideo", V4L2_PIX_FMT_YVU410
-	},
-	{
-		"rgb555le", "rawvideo", V4L2_PIX_FMT_RGB555
-	},
-	{
-		"rgb555be", "rawvideo", V4L2_PIX_FMT_RGB555X
-	},
-	{
-		"rgb565le", "rawvideo", V4L2_PIX_FMT_RGB565
-	},
-	{
-		"rgb565be", "rawvideo", V4L2_PIX_FMT_RGB565X
-	},
-	{
-		"bgr24", "rawvideo", V4L2_PIX_FMT_BGR24
-	},
-	{
-		"rgb24", "rawvideo", V4L2_PIX_FMT_RGB24
-	},
-	{
-		"bgr0", "rawvideo", V4L2_PIX_FMT_BGR32
-	},
-	{
-		"0rgb", "rawvideo", V4L2_PIX_FMT_RGB32
-	},
-	{
-		"gray8", "rawvideo", V4L2_PIX_FMT_GREY
-	},
-	{
-		"gray16le", "rawvideo", V4L2_PIX_FMT_Y16
-	},
-	{
-		"nv12", "rawvideo", V4L2_PIX_FMT_NV12
-	},
-	{
-		"", "mjpeg", V4L2_PIX_FMT_MJPEG
-	},
-	{
-		"", "mjpeg", V4L2_PIX_FMT_JPEG
-	},
-	{
-		"", "h264", V4L2_PIX_FMT_H264
-	},
-	{
-		"", "cpia", V4L2_PIX_FMT_CPIA1
-	},
-	{
-		"bayer_bggr8", "rawvideo", V4L2_PIX_FMT_SBGGR8
-	},
-	{
-		"bayer_gbrg8", "rawvideo", V4L2_PIX_FMT_SGBRG8
-	},
-	{
-		"bayer_grbg8", "rawvideo", V4L2_PIX_FMT_SGRBG8
-	},
-	{
-		"bayer_rggb8", "rawvideo", V4L2_PIX_FMT_SRGGB8
-	},
-	{
-		NULL, NULL, 0
-	}
+} format_table[] = {
+	{ "yuv420p", "rawvideo", V4L2_PIX_FMT_YUV420 },
+	{ "yuv420p", "rawvideo", V4L2_PIX_FMT_YVU420 },
+	{ "yuv422p", "rawvideo", V4L2_PIX_FMT_YUV422P },
+	{ "yuyv422", "rawvideo", V4L2_PIX_FMT_YUYV },
+	{ "uyvy422", "rawvideo", V4L2_PIX_FMT_UYVY },
+	{ "yuv411p", "rawvideo", V4L2_PIX_FMT_YUV411P },
+	{ "yuv410p", "rawvideo", V4L2_PIX_FMT_YUV410 },
+	{ "yuv410p", "rawvideo", V4L2_PIX_FMT_YVU410 },
+	{ "rgb555le", "rawvideo", V4L2_PIX_FMT_RGB555 },
+	{ "rgb555be", "rawvideo", V4L2_PIX_FMT_RGB555X },
+	{ "rgb565le", "rawvideo", V4L2_PIX_FMT_RGB565 },
+	{ "rgb565be", "rawvideo", V4L2_PIX_FMT_RGB565X },
+	{ "bgr24", "rawvideo", V4L2_PIX_FMT_BGR24 },
+	{ "rgb24", "rawvideo", V4L2_PIX_FMT_RGB24 },
+	{ "bgr0", "rawvideo", V4L2_PIX_FMT_BGR32 },
+	{ "0rgb", "rawvideo", V4L2_PIX_FMT_RGB32 },
+	{ "gray8", "rawvideo", V4L2_PIX_FMT_GREY },
+	{ "gray16le", "rawvideo", V4L2_PIX_FMT_Y16 },
+	{ "nv12", "rawvideo", V4L2_PIX_FMT_NV12 },
+	{ "", "mjpeg", V4L2_PIX_FMT_MJPEG },
+	{ "", "mjpeg", V4L2_PIX_FMT_JPEG },
+	{ "", "h264", V4L2_PIX_FMT_H264 },
+	{ "", "cpia", V4L2_PIX_FMT_CPIA1 },
+	{ "bayer_bggr8", "rawvideo", V4L2_PIX_FMT_SBGGR8 },
+	{ "bayer_gbrg8", "rawvideo", V4L2_PIX_FMT_SGBRG8 },
+	{ "bayer_grbg8", "rawvideo", V4L2_PIX_FMT_SGRBG8 },
+	{ "bayer_rggb8", "rawvideo", V4L2_PIX_FMT_SRGGB8 },
+	{ NULL, NULL, 0 }
 };
 
 struct vc_info {
@@ -176,6 +131,7 @@ struct ac_info {
 static struct vc_info vc_info[NVIDEODEV];
 static struct ac_info ac_info[NAUDIODEV];
 static pthread_mutex_t atomic_mtx;
+static pthread_cond_t atomic_cv;
 static int nvideo;
 static int naudio;
 static int wait_init;
@@ -210,6 +166,21 @@ do_atexit(void)
 		if (vc_info[i].pid != 0)
 			kill(vc_info[i].pid, SIGKILL);
 	}
+}
+
+static int
+write_async_locked(int fd, const void *data, int bytes)
+{
+	struct data *ptr;
+	ptr = malloc(sizeof(*ptr) + bytes);
+	if (ptr == NULL)
+		errx(EX_SOFTWARE, "Out of memory");
+	ptr->fd = fd;
+	ptr->bytes = bytes;
+	memcpy(ptr + 1, data, bytes);
+	TAILQ_INSERT_TAIL(&data_head, ptr, entry);
+	pthread_cond_signal(&atomic_cv);
+	return (bytes);
 }
 
 static void
@@ -381,9 +352,15 @@ video_thread(void *arg)
 	pcvi->fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	pcvi->fmt.fmt.pix.width = pcvi->width;
 	pcvi->fmt.fmt.pix.height = pcvi->height;
-	pcvi->fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
 	pcvi->fmt.fmt.pix.field = V4L2_FIELD_ANY;
-	error = ioctl(pcvi->fd, VIDIOC_S_FMT, &pcvi->fmt);
+
+	/* try all formats available */
+	for (error = -1, i = 0; format_table[i].codec_str != NULL; i++) {
+		pcvi->fmt.fmt.pix.pixelformat = format_table[i].pixfmt;
+		error = ioctl(pcvi->fd, VIDIOC_S_FMT, &pcvi->fmt);
+		if (error == 0)
+			break;
+	}
 	if (error != 0)
 		errx(EX_SOFTWARE, "%s: Cannot set format", pcvi->devname);
 
@@ -544,7 +521,7 @@ audio_thread(void *arg)
 
 	i = default_rate;
 	error = ioctl(pcai->fd, SNDCTL_DSP_SPEED, &i);
-	if (error != 0)
+	if (error != 0 || i != default_rate)
 		errx(EX_SOFTWARE, "%s: Cannot set sample rate", pcai->devname);
 
 	pcai->speed = i;
@@ -580,9 +557,10 @@ audio_thread(void *arg)
 				sizebuf[0] = 0;
 			}
 
-			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -loglevel quiet -f %s %s -framerate %f "
-			    " -i /dev/stdin -vcodec huffyuv -vsync -1 -f matroska -y %s_camera_%d.mkv",
-			    format_table[j].codec_str, sizebuf, (float)pcai->fps, default_prefix, i);
+			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -loglevel quiet -f %s %s -framerate %f -r %f "
+			    " -i /dev/stdin -vcodec huffyuv -vsync drop -start_at_zero -f matroska -y %s_camera_%d.mkv",
+			    format_table[j].codec_str, sizebuf, (float)pcai->fps,
+			    (float)pcai->fps, default_prefix, i);
 			printf("CMD: %s\n", cmdbuf);
 			vc_info[i].pipe = create_piped_process(cmdbuf, &vc_info[i].pid);
 		}
@@ -608,24 +586,22 @@ audio_thread(void *arg)
 		if (error != pcai->framesize)
 			errx(EX_SOFTWARE, "%s: Could not read from DSP device", pcai->devname);
 
+		atomic_lock();
 		if (pcai == ac_info) {
-			atomic_lock();
 			for (i = 0; i != nvideo; i++) {
 				if (vc_info[i].framebytesused == 0)
 					continue;
-				error = write(vc_info[i].pipe,
+				error = write_async_locked(vc_info[i].pipe,
 				    vc_info[i].framebuffer,
 				    vc_info[i].framebytesused);
 				if (error != (int)vc_info[i].framebytesused)
 					errx(EX_SOFTWARE, "%s: Could not write to pipe", pcai->devname);
 			}
-			atomic_unlock();
 		}
-		error = write(pcai->out_fd, pcai->framebuffer, pcai->framesize);
+		error = write_async_locked(pcai->out_fd, pcai->framebuffer, pcai->framesize);
 		if (error != pcai->framesize)
 			errx(EX_SOFTWARE, "%s: Could not write to file", pcai->devname);
 
-		atomic_lock();
 		pcai->bytes += pcai->framesize;
 		atomic_unlock();
 
@@ -638,8 +614,9 @@ audio_thread(void *arg)
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: videocast [-w 640] [-h 480] [ -b 8000 ] "
-	    "[-r 96000] [-p prefix] [-v /dev/video0] [-v 0xXXXXXXXX] -d /dev/dsp\n");
+	fprintf(stderr, "usage: videocast [-w 640] [-h 480] [-b 8000] "
+	    "[-r 96000] [-p prefix] [-v /dev/video0] [-v 0xXXXXXXXX] -d /dev/dsp\n"
+	    "[-b 3675] [-r 44100] [-b 2000] [-r 48000]\n");
 	exit(0);
 }
 
@@ -648,11 +625,10 @@ main(int argc, char **argv)
 {
 	int c;
 
-	atexit(&do_atexit);
-
 	pthread_mutex_init(&atomic_mtx, NULL);
+	pthread_cond_init(&atomic_cv, NULL);
 
-	while ((c = getopt(argc, argv, "w:h:v:d:p:r:b:")) != -1) {
+	while ((c = getopt(argc, argv, "h:w:v:d:p:r:b:")) != -1) {
 		switch (c) {
 		case 'b':
 			default_blocksize = atoi(optarg);
@@ -684,12 +660,15 @@ main(int argc, char **argv)
 			naudio++;
 			break;
 		default:
+			usage();
 			break;
 		}
 	}
 
 	if (nvideo == 0 || naudio == 0)
 		usage();
+
+	atexit(&do_atexit);
 
 	wait_init = naudio + nvideo;
 
@@ -700,6 +679,8 @@ main(int argc, char **argv)
 #ifdef HAVE_X11_SUPPORT
 			if (pthread_create(&dummy, NULL, &x11_thread, vc_info + c))
 				errx(EX_SOFTWARE, "Couldn't create thread");
+#else
+			errx(EX_SOFTWARE, "X11 support not compiled");
 #endif
 		} else {
 			if (pthread_create(&dummy, NULL, &video_thread, vc_info + c))
@@ -724,8 +705,20 @@ main(int argc, char **argv)
 
 	printf("Press CTRL+C to complete recording\n");
 
-	while (1)
-		pause();
-
+	while (1) {
+		struct data *ptr;
+		ptr = TAILQ_FIRST(&data_head);
+		if (ptr == NULL) {
+			pthread_cond_wait(&atomic_cv, &atomic_mtx);
+			continue;
+		}
+		TAILQ_REMOVE(&data_head, ptr, entry);
+		atomic_unlock();
+		if (write(ptr->fd, ptr->data, ptr->bytes) != ptr->bytes)
+			errx(EX_SOFTWARE, "Could not write data to file");
+		free(ptr);
+		atomic_lock();
+	}
+	atomic_unlock();	
 	return (0);
 }
