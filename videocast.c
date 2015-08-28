@@ -705,6 +705,7 @@ main(int argc, char **argv)
 
 	printf("Press CTRL+C to complete recording\n");
 
+	atomic_lock();
 	while (1) {
 		struct data *ptr;
 		ptr = TAILQ_FIRST(&data_head);
