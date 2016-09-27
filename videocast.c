@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2015 Hans Petter Selasky. All rights reserved.
+ * Copyright (c) 2014-2016 Hans Petter Selasky. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -140,6 +140,7 @@ static int default_height = 480;
 static int default_rate = 48000;
 static int default_blocksize = 2000;	/* 24 FPS is default */
 static const char *default_prefix = "project";
+static int default_quality = -1;
 
 static int write_le32(int, uint32_t);
 
@@ -540,6 +541,7 @@ audio_thread(void *arg)
 		for (i = 0; i != nvideo; i++) {
 			char cmdbuf[256];
 			char sizebuf[128];
+			char fmtbuf[128];
 			int j;
 
 			for (j = 0; format_table[j].codec_str != NULL; j++) {
@@ -557,10 +559,15 @@ audio_thread(void *arg)
 				sizebuf[0] = 0;
 			}
 
+			if (default_quality < 0)
+				snprintf(fmtbuf, sizeof(fmtbuf), "-vcodec huffyuv");
+			else
+				snprintf(fmtbuf, sizeof(fmtbuf), "-qscale %d -vcodec mjpeg", default_quality);
+
 			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -loglevel quiet -f %s %s -framerate %f -r %f "
-			    " -i /dev/stdin -vcodec huffyuv -vsync drop -start_at_zero -f matroska -y %s_camera_%d.mkv",
+			    " -i /dev/stdin %s -vsync drop -start_at_zero -f matroska -y %s_camera_%d.mkv",
 			    format_table[j].codec_str, sizebuf, (float)pcai->fps,
-			    (float)pcai->fps, default_prefix, i);
+			    (float)pcai->fps, fmtbuf, default_prefix, i);
 			printf("CMD: %s\n", cmdbuf);
 			vc_info[i].pipe = create_piped_process(cmdbuf, &vc_info[i].pid);
 		}
@@ -614,7 +621,7 @@ audio_thread(void *arg)
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: videocast [-w 640] [-h 480] [-b 8000] "
+	fprintf(stderr, "usage: videocast [-q 0] [-w 640] [-h 480] [-b 8000] "
 	    "[-r 96000] [-p prefix] [-v /dev/video0] [-v 0xXXXXXXXX] -d /dev/dsp\n"
 	    "[-b 3675] [-r 44100] [-b 2000] [-r 48000]\n");
 	exit(0);
@@ -628,7 +635,7 @@ main(int argc, char **argv)
 	pthread_mutex_init(&atomic_mtx, NULL);
 	pthread_cond_init(&atomic_cv, NULL);
 
-	while ((c = getopt(argc, argv, "h:w:v:d:p:r:b:")) != -1) {
+	while ((c = getopt(argc, argv, "h:w:v:d:p:r:b:q:")) != -1) {
 		switch (c) {
 		case 'b':
 			default_blocksize = atoi(optarg);
@@ -658,6 +665,9 @@ main(int argc, char **argv)
 				errx(EX_SOFTWARE, "Too many audio devices");
 			ac_info[naudio].devname = optarg;
 			naudio++;
+			break;
+		case 'q':
+			default_quality = atoi(optarg);
 			break;
 		default:
 			usage();
