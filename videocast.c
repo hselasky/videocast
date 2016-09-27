@@ -481,7 +481,7 @@ audio_thread(void *arg)
 
 		snprintf(fname, sizeof(fname), "%s_audio_%d.wav", default_prefix, (int)(pcai - ac_info));
 
-		pcai->out_fd = open(fname, O_WRONLY | O_TRUNC | O_CREAT, 0600);
+		pcai->out_fd = open(fname, O_WRONLY | O_TRUNC | O_CREAT, 0644);
 		if (pcai->out_fd < 0)
 			errx(EX_SOFTWARE, "Cannot open device '%s'", fname);
 	}
