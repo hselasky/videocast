@@ -6,9 +6,9 @@ PROG=videocast
 MAN=
 CFLAGS=-I${LOCALBASE}/include
 SRCS+= videocast.c
-LDFLAGS+= ${PTHREAD_LIBS}
+LDFLAGS+= ${PTHREAD_LIBS} -L${LOCALBASE}/lib -lv4l2
 .if defined(HAVE_X11_SUPPORT)
-LDFLAGS+= -L${LOCALBASE}/lib -lX11
+LDFLAGS+= -lX11
 CFLAGS+= -DHAVE_X11_SUPPORT
 .endif
 

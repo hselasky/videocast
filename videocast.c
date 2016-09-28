@@ -39,6 +39,7 @@
 #include <sys/queue.h>
 #include <unistd.h>
 #include <err.h>
+#include <libv4l2.h>
 
 #ifdef HAVE_X11_SUPPORT
 #include <X11/Xatom.h>
@@ -339,11 +340,11 @@ video_thread(void *arg)
 
 	/* standard V4L2 setup */
 
-	pcvi->fd = open(pcvi->devname, O_RDWR);
+	pcvi->fd = v4l2_open(pcvi->devname, O_RDWR);
 	if (pcvi->fd < 0)
 		errx(EX_SOFTWARE, "Cannot open device '%s'", pcvi->devname);
 
-	error = ioctl(pcvi->fd, VIDIOC_QUERYCAP, &pcvi->cap);
+	error = v4l2_ioctl(pcvi->fd, VIDIOC_QUERYCAP, &pcvi->cap);
 	if (error != 0)
 		errx(EX_SOFTWARE, "%s: Cannot query capabilities", pcvi->devname);
 
@@ -358,14 +359,14 @@ video_thread(void *arg)
 	/* try all formats available */
 	for (error = -1, i = 0; format_table[i].codec_str != NULL; i++) {
 		pcvi->fmt.fmt.pix.pixelformat = format_table[i].pixfmt;
-		error = ioctl(pcvi->fd, VIDIOC_S_FMT, &pcvi->fmt);
+		error = v4l2_ioctl(pcvi->fd, VIDIOC_S_FMT, &pcvi->fmt);
 		if (error == 0)
 			break;
 	}
 	if (error != 0)
 		errx(EX_SOFTWARE, "%s: Cannot set format", pcvi->devname);
 
-	error = ioctl(pcvi->fd, VIDIOC_G_FMT, &pcvi->fmt);
+	error = v4l2_ioctl(pcvi->fd, VIDIOC_G_FMT, &pcvi->fmt);
 	if (error != 0)
 		errx(EX_SOFTWARE, "%s: Cannot get format", pcvi->devname);
 
@@ -376,7 +377,7 @@ video_thread(void *arg)
 	pcvi->rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	pcvi->rb.memory = V4L2_MEMORY_MMAP;
 
-	error = ioctl(pcvi->fd, VIDIOC_REQBUFS, &pcvi->rb);
+	error = v4l2_ioctl(pcvi->fd, VIDIOC_REQBUFS, &pcvi->rb);
 	if (error != 0)
 		errx(EX_SOFTWARE, "%s: Cannot request buffers", pcvi->devname);
 
@@ -384,11 +385,11 @@ video_thread(void *arg)
 		pcvi->buf.index = i;
 		pcvi->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		pcvi->buf.memory = V4L2_MEMORY_MMAP;
-		error = ioctl(pcvi->fd, VIDIOC_QUERYBUF, &pcvi->buf);
+		error = v4l2_ioctl(pcvi->fd, VIDIOC_QUERYBUF, &pcvi->buf);
 		if (error != 0)
 			errx(EX_SOFTWARE, "%s: Cannot query buffer", pcvi->devname);
 		pcvi->framesize = pcvi->buf.length;
-		pcvi->addr[i] = mmap(0,
+		pcvi->addr[i] = v4l2_mmap(0,
 		    pcvi->buf.length, PROT_READ, MAP_SHARED, pcvi->fd,
 		    pcvi->buf.m.offset);
 		if (pcvi->addr[i] == MAP_FAILED)
@@ -398,7 +399,7 @@ video_thread(void *arg)
 		pcvi->buf.index = i;
 		pcvi->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		pcvi->buf.memory = V4L2_MEMORY_MMAP;
-		error = ioctl(pcvi->fd, VIDIOC_QBUF, &pcvi->buf);
+		error = v4l2_ioctl(pcvi->fd, VIDIOC_QBUF, &pcvi->buf);
 		if (error != 0)
 			errx(EX_SOFTWARE, "%s: Cannot queue buffer", pcvi->devname);
 	}
@@ -410,14 +411,14 @@ video_thread(void *arg)
 	memset(pcvi->framebuffer, 0, pcvi->framesize);
 
 	i = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	error = ioctl(pcvi->fd, VIDIOC_STREAMON, &i);
+	error = v4l2_ioctl(pcvi->fd, VIDIOC_STREAMON, &i);
 	if (error != 0)
 		errx(EX_SOFTWARE, "%s: Cannot enable stream", pcvi->devname);
 
 	while (1) {
 		pcvi->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		pcvi->buf.memory = V4L2_MEMORY_MMAP;
-		error = ioctl(pcvi->fd, VIDIOC_DQBUF, &pcvi->buf);
+		error = v4l2_ioctl(pcvi->fd, VIDIOC_DQBUF, &pcvi->buf);
 		if (error != 0)
 			errx(EX_SOFTWARE, "%s: Cannot dequeue buffer", pcvi->devname);
 
@@ -435,7 +436,7 @@ video_thread(void *arg)
 		}
 		atomic_unlock();
 
-		error = ioctl(pcvi->fd, VIDIOC_QBUF, &pcvi->buf);
+		error = v4l2_ioctl(pcvi->fd, VIDIOC_QBUF, &pcvi->buf);
 		if (error != 0)
 			errx(EX_SOFTWARE, "%s: Cannot enqueue buffer", pcvi->devname);
 	}
