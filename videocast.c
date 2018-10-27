@@ -566,7 +566,7 @@ audio_thread(void *arg)
 				snprintf(fmtbuf, sizeof(fmtbuf), "-qscale %d -vcodec mjpeg", default_quality);
 
 			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -loglevel quiet -f %s %s -framerate %f -r %f "
-			    " -i /dev/stdin %s -vsync drop -start_at_zero -f matroska -y %s_camera_%d.mkv",
+			    " -i /dev/stdin %s -vsync drop -start_at_zero -f matroska -y '%s_camera_%d.mkv'",
 			    format_table[j].codec_str, sizebuf, (float)pcai->fps,
 			    (float)pcai->fps, fmtbuf, default_prefix, i);
 			printf("CMD: %s\n", cmdbuf);
