@@ -563,7 +563,7 @@ audio_thread(void *arg)
 			if (default_quality < 0)
 				snprintf(fmtbuf, sizeof(fmtbuf), "-vcodec huffyuv");
 			else
-				snprintf(fmtbuf, sizeof(fmtbuf), "-qscale %d -vcodec mjpeg", default_quality);
+				snprintf(fmtbuf, sizeof(fmtbuf), "-q:v %d -vcodec mjpeg", default_quality);
 
 			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -loglevel quiet -f %s %s -framerate %f -r %f "
 			    " -i /dev/stdin %s -vsync drop -start_at_zero -f matroska -y '%s_camera_%d.mkv'",
