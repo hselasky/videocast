@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 Hans Petter Selasky. All rights reserved.
+ * Copyright (c) 2014-2018 Hans Petter Selasky. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -566,7 +566,7 @@ audio_thread(void *arg)
 				snprintf(fmtbuf, sizeof(fmtbuf), "-q:v %d -vcodec mjpeg", default_quality);
 
 			snprintf(cmdbuf, sizeof(cmdbuf), "ffmpeg -loglevel quiet -f %s %s -framerate %f -r %f "
-			    " -i /dev/stdin %s -vsync drop -start_at_zero -f matroska -y '%s_camera_%d.mkv'",
+			    "-fflags +genpts -i /dev/stdin %s -start_at_zero -f matroska -y -- '%s_camera_%d.mkv'",
 			    format_table[j].codec_str, sizebuf, (float)pcai->fps,
 			    (float)pcai->fps, fmtbuf, default_prefix, i);
 			printf("CMD: %s\n", cmdbuf);
