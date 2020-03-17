@@ -528,11 +528,11 @@ audio_thread(void *arg)
 
 	pcai->speed = i;
 
-	i = pcai->channels * default_blocksize;
+	i = pcai->channels * default_blocksize * (pcai->bits / 8);
 	if (i < 1)
 		errx(EX_SOFTWARE, "%s: Invalid block size %d", pcai->devname, i);
 	error = ioctl(pcai->fd, SNDCTL_DSP_SETBLKSIZE, &i);
-	pcai->framesize = i * (pcai->bits / 8);
+	pcai->framesize = i;
 	pcai->framebuffer = malloc(i);
 	if (pcai->framebuffer == NULL)
 		errx(EX_SOFTWARE, "%s: Cannot allocate buffer", pcai->devname);
